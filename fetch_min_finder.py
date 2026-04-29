@@ -1,19 +1,27 @@
 #!/usr/bin/env python3
 """
-RAPTOR MIN FINDER — fetch_min_finder.py v3.0
+RAPTOR MIN FINDER — fetch_min_finder.py v4.0
 ═════════════════════════════════════════════
-Scansione notturna completa su 2.253 ETF.
+Scansione notturna completa su universe filtrato.
 
-Passata 1: tutti i ticker — batch 25, delay 2s
-Passata 2: falliti P1    — batch 10, delay 4s
-Passata 3: falliti P2    — batch  5, delay 6s
+METODO INVERSIONE:
+  3 trigger (tutti per BUY1, 2/3 per BUY2, 1/3 per BUY3):
+    1. Prezzo taglia KAMA dal basso (cross ≤5 barre)
+    2. ATR in crescita mentre prezzo sale
+    3. OBV divergenza bullish
 
-Per ogni candidato (nelle 4 liste) calcola:
-  - SAR Parabolico
-  - OBV (On Balance Volume)
-  - KAMA (10)
-  - Bande di Bollinger (20)
-  - Dati chart completi (90 barre)
+  Indicazione complementare (non nello score):
+    - Price action: 3 chiusure consecutive crescenti
+
+UNIVERSE FILTRATO:
+  Escluse categorie: Liquidità, Monetario, BOND,
+    Fineco_OBBLIGAZIONARI, Obbligazionario
+  Esclusi per nome: bond, treasury, overnight,
+    government, corporate, inflation-linked
+  Short incluso.
+
+MA200: solo nel pullback.
+SAR:   solo visivo nel grafico.
 
 Output: data/min_finder.json
         data/min_finder_checkpoint.json
@@ -44,18 +52,15 @@ CKPT_FILE  = DATA_DIR / "min_finder_checkpoint.json"
 BLIST_FILE = DATA_DIR / "min_finder_blacklist.json"
 ETF_FILE   = DATA_DIR / "etf_universe.json"
 
-SOGLIA_MIN_STORICO  = 0.05
+SOGLIA_MIN_STORICO  = 0.10   # 10% dal minimo 52W (era 5%)
 SOGLIA_PULLBACK_MIN = 0.05
 SOGLIA_PULLBACK_MAX = 0.15
 SOGLIA_ATR_COMPRES  = 0.30
 SOGLIA_MIN_RELATIVO = 0.08
 MAX_FAILS           = 3
 
-
-# Correzione scala per ticker con dati Yahoo anomali
-# Formato: "TICKER": fattore_moltiplicativo
 PRICE_SCALE_FIX = {
-    "LCCN.MI": 10000,   # Amundi MSCI China — Yahoo scala /10000
+    "LCCN.MI": 10000,
 }
 
 PASSATE = [
@@ -63,6 +68,26 @@ PASSATE = [
     (10, 4.0, "Passata 2 — falliti P1"),
     ( 5, 6.0, "Passata 3 — falliti P2"),
 ]
+
+# ── FILTRO UNIVERSE ───────────────────────────────────────────
+CATEGORIE_ESCLUSE = {
+    'BOND', 'Liquidità', 'Liquidita', 'Monetario',
+    'Fineco_OBBLIGAZIONARI', 'Obbligazionario',
+}
+
+PAROLE_ESCLUSE_NOME = [
+    'bond', 'treasury', 'overnight', 'government',
+    'corporate', 'inflation-linked',
+]
+
+def etf_da_escludere(d):
+    cat  = str(d.get('CATEGORIA', '') or '')
+    nome = str(d.get('NOME', '') or '').lower()
+    if cat in CATEGORIE_ESCLUSE:
+        return True
+    if any(p in nome for p in PAROLE_ESCLUSE_NOME):
+        return True
+    return False
 
 # ── UNIVERSE ──────────────────────────────────────────────────
 def load_universe():
@@ -72,16 +97,21 @@ def load_universe():
     with open(ETF_FILE) as f:
         data = json.load(f)
     universe = []
+    esclusi  = 0
     for d in data:
         t = str(d.get('TICKER', '')).strip()
-        if not t or len(t) < 2 or t == 'nan': continue
+        if not t or len(t) < 2 or t == 'nan':
+            continue
+        if etf_da_escludere(d):
+            esclusi += 1
+            continue
         universe.append({
             "t": t,
             "n": str(d.get('NOME', '')).strip().replace('nan', '') or t,
             "b": str(d.get('BORSA', '')).strip().replace('nan', '') or '',
             "c": str(d.get('CATEGORIA', '')).strip().replace('nan', '') or 'Altro',
         })
-    print(f"  Universo: {len(universe)} ETF")
+    print(f"  Universo: {len(universe)} ETF (esclusi {esclusi} bond/liquidità)")
     return universe
 
 # ── CHECKPOINT ────────────────────────────────────────────────
@@ -106,17 +136,19 @@ def load_blacklist():
         try:
             with open(BLIST_FILE) as f:
                 return set(json.load(f))
-        except: pass
+        except:
+            pass
     return set()
 
 def save_blacklist(blist):
     with open(BLIST_FILE, "w") as f:
         json.dump(sorted(blist), f)
 
-# ── FETCH ────────────────────────────────────────────────────
+# ── FETCH ─────────────────────────────────────────────────────
 def fetch_batch(tickers: list) -> dict:
     result = {}
-    if not tickers: return result
+    if not tickers:
+        return result
     try:
         if len(tickers) == 1:
             hist = yf.Ticker(tickers[0]).history(period="1y", auto_adjust=True)
@@ -207,7 +239,8 @@ def calc_sar(h, l, af_step=0.02, af_max=0.2):
     h, l = np.array(h), np.array(l)
     sar  = np.full(len(h), np.nan)
     bull_arr = np.zeros(len(h), dtype=bool)
-    if len(h) < 2: return sar, bull_arr
+    if len(h) < 2:
+        return sar, bull_arr
     bull = True; af = af_step; ep = h[0]; sar[0] = l[0]; bull_arr[0] = True
     for i in range(1, len(h)):
         prev = sar[i-1]
@@ -232,7 +265,8 @@ def calc_kama(c, n=10, fast=5, slow=20):
     c = np.array(c, dtype=float)
     fs, ss = 2/(fast+1), 2/(slow+1)
     kama = np.full(len(c), np.nan)
-    if len(c) <= n: return kama
+    if len(c) <= n:
+        return kama
     kama[n] = c[n]
     for i in range(n+1, len(c)):
         direction  = abs(c[i]-c[i-n])
@@ -253,7 +287,8 @@ def calc_obv(c, v):
 
 def calc_ma(arr, period):
     arr = np.array(arr)
-    if len(arr) < period: return None
+    if len(arr) < period:
+        return None
     return float(np.mean(arr[-period:]))
 
 def calc_bb(c, period=20, n_std=2.0):
@@ -273,6 +308,87 @@ def clean(arr, n=90):
     arr = np.array(arr, dtype=float)[-n:]
     return [round(float(v),4) if not math.isnan(v) else None for v in arr]
 
+# ── TRIGGER INVERSIONE ────────────────────────────────────────
+def calc_inversion_signals(c, kama_arr, atr_arr, obv_arr):
+    """
+    Calcola i 3 trigger di inversione + price action complementare.
+    """
+    c = np.array(c, dtype=float)
+    n = len(c)
+
+    # TRIGGER 1: KAMA cross dal basso ≤5 barre
+    kama_cross       = False
+    kama_cross_bars  = None
+    price_above_kama = False
+
+    if n >= 2 and not np.isnan(kama_arr[-1]):
+        price_above_kama = bool(c[-1] > kama_arr[-1])
+        for bars_ago in range(1, 6):
+            idx = n - bars_ago
+            if idx < 1:
+                continue
+            if np.isnan(kama_arr[idx]) or np.isnan(kama_arr[idx-1]):
+                continue
+            if c[idx] > kama_arr[idx] and c[idx-1] <= kama_arr[idx-1]:
+                kama_cross      = True
+                kama_cross_bars = bars_ago
+                break
+
+    # TRIGGER 2: ATR rising mentre prezzo sale
+    atr_rising = False
+    if n >= 6:
+        atr_now  = float(atr_arr[-1]) if not np.isnan(atr_arr[-1]) else None
+        atr_5ago = None
+        for i in range(n-2, max(n-7, -1), -1):
+            if i >= 0 and not np.isnan(atr_arr[i]):
+                atr_5ago = float(atr_arr[i])
+                break
+        price_rising = bool(c[-1] > c[-5]) if n >= 5 else False
+        if atr_now and atr_5ago:
+            atr_rising = bool(atr_now > atr_5ago and price_rising)
+
+    # TRIGGER 3: OBV divergenza bullish
+    obv_divergence = False
+    if n > 20:
+        price_trend = float(c[-1] - c[-20])
+        obv_trend   = float(obv_arr[-1] - obv_arr[-20])
+        obv_divergence = bool(price_trend < 0 and obv_trend > 0)
+
+    # COMPLEMENTARE: 3 chiusure consecutive crescenti
+    price_action_3up = False
+    if n >= 4:
+        price_action_3up = bool(c[-1] > c[-2] > c[-3] > c[-4])
+
+    # SCORE INVERSIONE
+    trigger_count = sum([kama_cross, atr_rising, obv_divergence])
+    score = 0
+    if kama_cross:
+        base = 40
+        if kama_cross_bars == 1:   base += 10
+        elif kama_cross_bars == 2: base += 5
+        score += base
+    if atr_rising:    score += 30
+    if obv_divergence: score += 30
+    inversion_score = min(100, score)
+
+    return {
+        "kama_cross":        kama_cross,
+        "kama_cross_bars":   kama_cross_bars,
+        "price_above_kama":  price_above_kama,
+        "atr_rising":        atr_rising,
+        "obv_divergence":    obv_divergence,
+        "price_action_3up":  price_action_3up,
+        "inversion_score":   inversion_score,
+        "trigger_count":     trigger_count,
+    }
+
+def calc_buy_level(inv):
+    tc = inv["trigger_count"]
+    if tc >= 3: return "BUY1"
+    if tc == 2: return "BUY2"
+    if tc == 1: return "BUY3"
+    return "WATCH"
+
 # ── ANALISI ETF ───────────────────────────────────────────────
 def analyze_etf(ticker, pd, etf_info):
     try:
@@ -283,75 +399,61 @@ def analyze_etf(ticker, pd, etf_info):
         d = pd.get("d", [])
         n = len(c)
         price = float(c[-1])
-        if price <= 0 or n < 50: return None
+        if price <= 0 or n < 50:
+            return None
 
-        # Correzione scala per ticker con dati Yahoo anomali
         scale = PRICE_SCALE_FIX.get(ticker, 1)
         if scale != 1:
-            c = c * scale
-            h = h * scale
-            l = l * scale
+            c = c*scale; h = h*scale; l = l*scale
             price = float(c[-1])
-            print(f"    ⚙ Scala corretta ×{scale} → {price:.2f}")
         elif price < 0.10:
-            # Prezzo anomalo senza correzione nota → tenta ×10000
             candidate = price * 10000
             if 1.0 < candidate < 50000:
-                c = c * 10000
-                h = h * 10000
-                l = l * 10000
+                c = c*10000; h = h*10000; l = l*10000
                 price = float(c[-1])
-                print(f"    ⚙ Scala auto-corretta ×10000 → {price:.2f}")
             else:
-                print(f"    ⚠ Prezzo anomalo {price:.6f} — skip")
                 return None
 
         low_52w  = float(np.min(c[-252:])) if n>=252 else float(np.min(c))
         high_52w = float(np.max(c[-252:])) if n>=252 else float(np.max(c))
         dist_low = (price-low_52w)/low_52w if low_52w>0 else 1.0
 
-        ret_1w = float(price/c[-6]-1)   if n>6  else None
-        ret_4w = float(price/c[-21]-1)  if n>21 else None
-        ret_3m = float(price/c[-63]-1)  if n>63 else None
+        ret_1w = float(price/c[-6]-1)  if n>6  else None
+        ret_4w = float(price/c[-21]-1) if n>21 else None
+        ret_3m = float(price/c[-63]-1) if n>63 else None
 
         ma50  = calc_ma(c, 50)
         ma200 = calc_ma(c, 200)
         ma200_rising = False
-        if ma200 and n>=210:
-            ma200_prev = calc_ma(c[:-5], 200)
+        if ma200 and n >= 210:
+            ma200_prev   = calc_ma(c[:-5], 200)
             ma200_rising = bool(ma200 > (ma200_prev or 0))
 
-        atr_arr  = calc_atr(h, l, c, 14)
-        atr_c    = float(atr_arr[-1]) if not np.isnan(atr_arr[-1]) else None
+        atr_arr    = calc_atr(h, l, c, 14)
+        atr_c      = float(atr_arr[-1]) if not np.isnan(atr_arr[-1]) else None
         atr_3m_val = float(np.mean(np.abs(np.diff(c[-63:])))) if n>63 else None
         atr_ratio  = float(atr_c/atr_3m_val) if atr_c and atr_3m_val and atr_3m_val>0 else None
 
         high_4w     = float(np.max(c[-21:])) if n>21 else price
         drawdown_4w = float((high_4w-price)/high_4w) if high_4w>0 else 0.0
 
-        # ── INDICATORI TECNICI ──
         sar_arr, bull_arr = calc_sar(h, l)
         sar_bull = bool(bull_arr[-1])
         sar_val  = float(sar_arr[-1]) if not np.isnan(sar_arr[-1]) else None
 
         kama_arr = calc_kama(c, n=10, fast=5, slow=20)
         kama_val = float(kama_arr[-1]) if not np.isnan(kama_arr[-1]) else None
-        kama_prev = float(kama_arr[-2]) if len(kama_arr)>1 and not np.isnan(kama_arr[-2]) else kama_val
-        price_crossed_kama = kama_val and (price > kama_val) and (c[-2] <= kama_prev if len(c)>1 else False)
-        price_above_kama   = kama_val and price > kama_val
 
         obv_arr = calc_obv(c, v)
-        # OBV divergenza: prezzo scende ma OBV tiene (ultimi 20gg)
-        obv_div = False
-        if n > 20:
-            price_trend = float(c[-1] - c[-20])
-            obv_trend   = float(obv_arr[-1] - obv_arr[-20])
-            obv_div     = bool(price_trend < 0 and obv_trend > 0)
 
         bb_mid, bb_upper, bb_lower = calc_bb(c, 20, 2.0)
         bb_width = float((bb_upper[-1]-bb_lower[-1])/bb_mid[-1]) if not np.isnan(bb_mid[-1]) and bb_mid[-1]>0 else None
 
-        # ── CRITERI CATEGORIE ──
+        # Trigger inversione
+        inv       = calc_inversion_signals(c, kama_arr, atr_arr, obv_arr)
+        buy_level = calc_buy_level(inv)
+
+        # Zone minimo
         is1 = bool(dist_low <= SOGLIA_MIN_STORICO)
         s1  = int(100 - dist_low/SOGLIA_MIN_STORICO*50) if is1 else 0
 
@@ -370,24 +472,10 @@ def analyze_etf(ticker, pd, etf_info):
         n_cat = sum([is1, is2, is3])
         sm    = max(s1, s2, s3)
 
-        # ── SEGNALE TECNICO ──
-        tech_score = 0
-        if sar_bull:         tech_score += 35
-        if price_above_kama: tech_score += 30
-        if ma200 and price > ma200: tech_score += 20
-        if obv_div:          tech_score += 15
+        # Score composito: categoria 40% + inversione 60%
+        composite_score = round(sm * 0.40 + inv["inversion_score"] * 0.60, 1)
 
-        # BUY1/BUY2/BUY3
-        if sar_bull and price_above_kama and ma200 and price > ma200:
-            buy_level = "BUY1"
-        elif (sar_bull and price_above_kama) or (sar_bull and ma200 and price > ma200):
-            buy_level = "BUY2"
-        elif sar_bull or price_above_kama:
-            buy_level = "BUY3"
-        else:
-            buy_level = "WATCH"
-
-        # Chart data (solo ultimi 90 barre)
+        # Chart
         n90 = min(90, n)
         chart = {
             "dates":   d[-n90:],
@@ -407,51 +495,56 @@ def analyze_etf(ticker, pd, etf_info):
         }
 
         return {
-            "ticker":           ticker,
-            "name":             etf_info.get("n", ticker),
-            "borsa":            etf_info.get("b", ""),
-            "categoria":        etf_info.get("c", ""),
-            "price":            round(price, 4),
-            "low_52w":          round(low_52w, 4),
-            "high_52w":         round(high_52w, 4),
-            "dist_52w_low":     round(dist_low*100, 2),
-            "dist_52w_high":    round((high_52w-price)/high_52w*100, 2) if high_52w>0 else 0,
-            "ret_1w":           round(ret_1w*100, 2) if ret_1w is not None else None,
-            "ret_4w":           round(ret_4w*100, 2) if ret_4w is not None else None,
-            "ret_3m":           round(ret_3m*100, 2) if ret_3m is not None else None,
-            "ma50":             round(ma50, 4)  if ma50  else None,
-            "ma200":            round(ma200, 4) if ma200 else None,
-            "ma200_rising":     ma200_rising,
-            "drawdown_4w":      round(drawdown_4w*100, 2),
-            "atr":              round(atr_c, 4) if atr_c else None,
-            "atr_ratio":        round(atr_ratio, 3) if atr_ratio else None,
-            "sar_bull":         sar_bull,
-            "sar":              round(sar_val, 4) if sar_val else None,
-            "kama":             round(kama_val, 4) if kama_val else None,
-            "price_above_kama": price_above_kama,
-            "price_crossed_kama": price_crossed_kama,
-            "obv_divergence":   obv_div,
-            "bb_width":         round(bb_width, 4) if bb_width else None,
-            "tech_score":       tech_score,
-            "buy_level":        buy_level,
-            "is_min_storico":   is1,
-            "is_pullback":      is2,
-            "is_compressione":  is3,
-            "is_min_relativo":  False,
-            "score_min_storico":   s1,
-            "score_pullback":      s2,
-            "score_compressione":  s3,
-            "score_min_relativo":  0,
-            "score_master":        sm,
-            "n_categorie":         n_cat,
-            "cat_mean_ret3m":      0.0,
-            "chart":               chart,
+            "ticker":            ticker,
+            "name":              etf_info.get("n", ticker),
+            "borsa":             etf_info.get("b", ""),
+            "categoria":         etf_info.get("c", ""),
+            "price":             round(price, 4),
+            "low_52w":           round(low_52w, 4),
+            "high_52w":          round(high_52w, 4),
+            "dist_52w_low":      round(dist_low*100, 2),
+            "dist_52w_high":     round((high_52w-price)/high_52w*100, 2) if high_52w>0 else 0,
+            "ret_1w":            round(ret_1w*100, 2) if ret_1w is not None else None,
+            "ret_4w":            round(ret_4w*100, 2) if ret_4w is not None else None,
+            "ret_3m":            round(ret_3m*100, 2) if ret_3m is not None else None,
+            "ma50":              round(ma50, 4)  if ma50  else None,
+            "ma200":             round(ma200, 4) if ma200 else None,
+            "ma200_rising":      ma200_rising,
+            "drawdown_4w":       round(drawdown_4w*100, 2),
+            "atr":               round(atr_c, 4) if atr_c else None,
+            "atr_ratio":         round(atr_ratio, 3) if atr_ratio else None,
+            "sar_bull":          sar_bull,
+            "sar":               round(sar_val, 4) if sar_val else None,
+            "kama":              round(kama_val, 4) if kama_val else None,
+            "price_above_kama":  inv["price_above_kama"],
+            "kama_cross":        inv["kama_cross"],
+            "kama_cross_bars":   inv["kama_cross_bars"],
+            "atr_rising":        inv["atr_rising"],
+            "obv_divergence":    inv["obv_divergence"],
+            "price_action_3up":  inv["price_action_3up"],
+            "inversion_score":   inv["inversion_score"],
+            "trigger_count":     inv["trigger_count"],
+            "bb_width":          round(bb_width, 4) if bb_width else None,
+            "buy_level":         buy_level,
+            "is_min_storico":    is1,
+            "is_pullback":       is2,
+            "is_compressione":   is3,
+            "is_min_relativo":   False,
+            "score_min_storico": s1,
+            "score_pullback":    s2,
+            "score_compressione":s3,
+            "score_min_relativo":0,
+            "score_master":      sm,
+            "n_categorie":       n_cat,
+            "cat_mean_ret3m":    0.0,
+            "composite_score":   composite_score,
+            "chart":             chart,
         }
     except Exception as e:
         print(f"  ⚠ {ticker}: {e}")
         return None
 
-# ── MIN RELATIVI ─────────────────────────────────────────────
+# ── MIN RELATIVI ──────────────────────────────────────────────
 def compute_min_relativi(results):
     from collections import defaultdict
     by_cat = defaultdict(list)
@@ -472,31 +565,32 @@ def compute_min_relativi(results):
                 r['score_min_relativo'] = int(min(100, diff*5))
                 r['n_categorie']       += 1
                 r['score_master']       = max(r['score_master'], r['score_min_relativo'])
+                r['composite_score']    = round(
+                    r['score_master'] * 0.40 +
+                    r['inversion_score'] * 0.60, 1
+                )
     return results
 
 # ── TOP 20 ────────────────────────────────────────────────────
 def compute_top20(results):
     """
-    Seleziona i TOP 20 candidati operativi.
-    Score composito = score_master×40% + tech_score×40% + obv_div×20%
+    Seleziona i TOP 20 candidati.
+    Richiede almeno 1 trigger di inversione attivo.
     """
-    candidates = [r for r in results if r and r.get('n_categorie',0) >= 1]
-    for r in candidates:
-        composite = (
-            r.get('score_master', 0) * 0.40 +
-            r.get('tech_score', 0)   * 0.40 +
-            (20 if r.get('obv_divergence') else 0) * 1.0
-        )
-        r['composite_score'] = round(composite, 1)
-
+    candidates = [
+        r for r in results
+        if r
+        and r.get('n_categorie', 0) >= 1
+        and r.get('trigger_count', 0) >= 1
+    ]
     sorted_cands = sorted(candidates, key=lambda x: x['composite_score'], reverse=True)
 
-    # Dividi per livello buy
     top20 = []
     for level in ['BUY1', 'BUY2', 'BUY3', 'WATCH']:
-        level_items = [r for r in sorted_cands if r.get('buy_level')==level and r not in top20]
-        top20.extend(level_items)
-        if len(top20) >= 20: break
+        items = [r for r in sorted_cands if r.get('buy_level')==level and r not in top20]
+        top20.extend(items)
+        if len(top20) >= 20:
+            break
 
     return [{
         "ticker":           r["ticker"],
@@ -506,12 +600,17 @@ def compute_top20(results):
         "price":            r["price"],
         "buy_level":        r["buy_level"],
         "composite_score":  r["composite_score"],
-        "tech_score":       r["tech_score"],
+        "inversion_score":  r["inversion_score"],
+        "trigger_count":    r["trigger_count"],
         "score_master":     r["score_master"],
         "n_categorie":      r["n_categorie"],
-        "sar_bull":         r["sar_bull"],
+        "kama_cross":       r["kama_cross"],
+        "kama_cross_bars":  r["kama_cross_bars"],
         "price_above_kama": r["price_above_kama"],
+        "atr_rising":       r["atr_rising"],
         "obv_divergence":   r["obv_divergence"],
+        "price_action_3up": r["price_action_3up"],
+        "sar_bull":         r["sar_bull"],
         "ma200":            r.get("ma200"),
         "atr":              r.get("atr"),
         "ret_1w":           r.get("ret_1w"),
@@ -531,11 +630,11 @@ def make_serializable(obj):
     if isinstance(obj, np.ndarray):       return obj.tolist()
     return obj
 
-# ── MAIN ─────────────────────────────────────────────────────
+# ── MAIN ──────────────────────────────────────────────────────
 def main():
     t0 = time.time()
     print("="*60)
-    print(f"RAPTOR MIN FINDER v3.0 — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    print(f"RAPTOR MIN FINDER v4.0 — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print("="*60)
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -545,61 +644,75 @@ def main():
     ck          = load_checkpoint()
     blist       = load_blacklist()
 
-    # ── 3 PASSATE ──
+    # Rimuovi dal checkpoint ticker non più nell'universe
+    tickers_validi = set(all_tickers)
+    rimossi_ck = [t for t in list(ck["prices"].keys()) if t not in tickers_validi]
+    for t in rimossi_ck:
+        del ck["prices"][t]
+    if rimossi_ck:
+        print(f"  Rimossi dal checkpoint: {len(rimossi_ck)} ticker non più nell'universe")
+        save_checkpoint(ck)
+
     already = set(ck["prices"].keys())
     todo_p1 = [t for t in all_tickers if t not in already and t not in blist]
     print(f"\n  Cache: {len(already)} · Da scaricare: {len(todo_p1)} · Blacklist: {len(blist)}")
 
     falliti = todo_p1
     for bs, dl, nm in PASSATE:
-        if not falliti: print(f"\n  ⚡ {nm} saltata"); continue
+        if not falliti:
+            print(f"\n  ⚡ {nm} saltata")
+            continue
         todo = [t for t in falliti if t not in ck["prices"] and t not in blist]
-        if not todo: falliti=[]; continue
+        if not todo:
+            falliti = []
+            continue
         ck, falliti = scan_incremental(todo, ck, bs, dl, nm)
 
-    # Aggiorna blacklist
     new_bl = 0
-    for t, n in ck["fails"].items():
-        if n >= MAX_FAILS and t not in blist:
+    for t, n_fails in ck["fails"].items():
+        if n_fails >= MAX_FAILS and t not in blist:
             blist.add(t); new_bl += 1
     if new_bl:
         print(f"\n  🚫 Blacklist: +{new_bl} ticker")
         save_blacklist(blist)
 
-    # ── ANALISI ──
     elapsed = (time.time()-t0)/60
     print(f"\n  Prezzi in cache: {len(ck['prices'])}/{len(all_tickers)} · Tempo: {elapsed:.1f} min")
     print("  Analisi ETF...")
 
     results = []
-    for ticker, pd in ck["prices"].items():
+    for ticker, price_data in ck["prices"].items():
         info = ticker_map.get(ticker, {"n":ticker,"b":"","c":"Altro"})
-        r = analyze_etf(ticker, pd, info)
+        r = analyze_etf(ticker, price_data, info)
         if r: results.append(r)
     print(f"  Analizzati: {len(results)} ETF")
 
     results = compute_min_relativi(results)
 
-    lista1 = sorted([r for r in results if r['is_min_storico']],  key=lambda x: x['score_min_storico'],  reverse=True)
-    lista2 = sorted([r for r in results if r['is_pullback']],     key=lambda x: x['score_pullback'],     reverse=True)
-    lista3 = sorted([r for r in results if r['is_compressione']], key=lambda x: x['score_compressione'], reverse=True)
-    lista4 = sorted([r for r in results if r['is_min_relativo']], key=lambda x: x['score_min_relativo'], reverse=True)
-    master  = sorted([r for r in results if r['n_categorie']>=2], key=lambda x: x['score_master'],       reverse=True)
+    lista1 = sorted([r for r in results if r['is_min_storico']],  key=lambda x: x['composite_score'], reverse=True)
+    lista2 = sorted([r for r in results if r['is_pullback']],     key=lambda x: x['composite_score'], reverse=True)
+    lista3 = sorted([r for r in results if r['is_compressione']], key=lambda x: x['composite_score'], reverse=True)
+    lista4 = sorted([r for r in results if r['is_min_relativo']], key=lambda x: x['composite_score'], reverse=True)
+    master  = sorted([r for r in results if r['n_categorie']>=2], key=lambda x: x['composite_score'], reverse=True)
     top20   = compute_top20(results)
     cands   = list({r['ticker'] for r in lista1+lista2+lista3+lista4+master})
 
-    print(f"\n  📉 {len(lista1)} · 🔄 {len(lista2)} · 🔥 {len(lista3)} · 📊 {len(lista4)} · ⭐ {len(master)} · 🎯 TOP20: {len(top20)}")
+    n_buy1 = sum(1 for r in results if r.get('buy_level')=='BUY1')
+    n_buy2 = sum(1 for r in results if r.get('buy_level')=='BUY2')
+    n_buy3 = sum(1 for r in results if r.get('buy_level')=='BUY3')
 
-    # Rimuovi chart dai record nelle liste (troppo pesante) — tienilo solo nel dict per ticker
+    print(f"\n  📉 Min storico: {len(lista1)} · 🔄 Pullback: {len(lista2)}")
+    print(f"  🔥 Compressione: {len(lista3)} · 📊 Min relativo: {len(lista4)}")
+    print(f"  ⭐ Master 2+: {len(master)} · 🎯 TOP20: {len(top20)}")
+    print(f"  🟢 BUY1:{n_buy1} BUY2:{n_buy2} BUY3:{n_buy3}")
+
     def strip_chart(lst, max_items=200):
         out = []
         for r in lst[:max_items]:
-            rc = dict(r)
-            rc.pop('chart', None)
+            rc = dict(r); rc.pop('chart', None)
             out.append(rc)
         return out
 
-    # Chart separato indicizzato per ticker (solo candidati)
     charts = {}
     for r in results:
         if r.get('n_categorie',0) >= 1 and 'chart' in r:
@@ -607,16 +720,17 @@ def main():
 
     output = make_serializable({
         "generated":    datetime.now(timezone.utc).isoformat(),
-        "version":      "3.0",
+        "version":      "4.0",
         "universe_tot": len(all_tickers),
         "analyzed":     len(results),
         "cached":       len(ck["prices"]),
         "blacklisted":  len(blist),
         "candidates":   cands,
         "stats": {
-            "min_storico":  len(lista1), "pullback":  len(lista2),
+            "min_storico":  len(lista1), "pullback":     len(lista2),
             "compressione": len(lista3), "min_relativo": len(lista4),
-            "master": len(master), "top20": len(top20),
+            "master": len(master),       "top20":        len(top20),
+            "buy1": n_buy1, "buy2": n_buy2, "buy3": n_buy3,
         },
         "soglie": {
             "min_storico_pct":  SOGLIA_MIN_STORICO*100,
@@ -640,7 +754,7 @@ def main():
 
     size_kb = OUT_FILE.stat().st_size/1024
     print(f"\n✅ {OUT_FILE.name} ({size_kb:.0f} KB) · {elapsed:.1f} min totali")
-    print(f"   📊 Charts salvati: {len(charts)} candidati")
+    print(f"   📊 Charts: {len(charts)} candidati")
 
 if __name__ == "__main__":
     main()
