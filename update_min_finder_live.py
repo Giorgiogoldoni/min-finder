@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-RAPTOR MIN FINDER — update_min_finder_live.py v2.0
+RAPTOR MIN FINDER — update_min_finder_live.py v3.0
 ════════════════════════════════════════════════════
 Aggiornamento pomeridiano (15:00 IT) — solo candidati.
 
 1. Aggiorna prezzi live dei candidati
-2. Ricalcola SAR, KAMA, OBV con prezzi aggiornati
+2. Ricalcola trigger inversione con prezzi aggiornati
 3. Riordina TOP 20 con segnaletica BUY1/BUY2/BUY3
 4. Salva min_finder_live.json
 
@@ -58,6 +58,8 @@ def fetch_live(tickers: list) -> dict:
                             "high":   round(float(highs.iloc[-1]), 4),
                             "low":    round(float(lows.iloc[-1]), 4),
                             "vol":    int(vols.iloc[-1]),
+                            # Ultimi 3 prezzi per price action
+                            "closes_3": [round(float(closes.iloc[j]), 4) for j in [-3,-2,-1] if abs(j) <= len(closes)],
                         }
             else:
                 data = yf.download(batch, period="5d", interval="1d",
@@ -78,8 +80,10 @@ def fetch_live(tickers: list) -> dict:
                                 "high":   round(float(highs.iloc[-1]), 4),
                                 "low":    round(float(lows.iloc[-1]), 4),
                                 "vol":    int(vols.iloc[-1]),
+                                "closes_3": [round(float(closes.iloc[j]), 4) for j in range(max(-3,-len(closes)), 0)],
                             }
-                    except: pass
+                    except:
+                        pass
         except Exception as e:
             print(f"  err batch {i+1}: {e}")
         if i < len(batches)-1:
@@ -88,75 +92,107 @@ def fetch_live(tickers: list) -> dict:
 
 def update_entry(entry: dict, live: dict) -> dict:
     t = entry['ticker']
-    if t in live:
-        entry['price']        = live[t]['price']
-        entry['ret_1d']       = live[t]['ret_1d']
-        entry['live_updated'] = True
-        if entry.get('low_52w') and entry['low_52w']>0:
-            entry['dist_52w_low'] = round((entry['price']-entry['low_52w'])/entry['low_52w']*100, 2)
-        # Aggiorna segnale SAR approssimato (usando high/low del giorno)
-        if live[t].get('high') and live[t].get('low'):
-            price  = entry['price']
-            prev   = live[t]['prev']
-            sar    = entry.get('sar')
-            if sar:
-                # SAR semplice: se prezzo > SAR precedente → bull
-                entry['sar_bull'] = price > sar
-        # Aggiorna KAMA approssimato
-        kama = entry.get('kama')
-        if kama:
-            price = entry['price']
-            er    = min(1.0, abs(price-prev)/(abs(price-prev)+0.001))
-            sc    = (er*(2/6-2/21)+2/21)**2
-            new_kama = kama + sc*(price-kama)
-            entry['kama']             = round(new_kama, 4)
-            entry['price_above_kama'] = price > new_kama
-        # Ricalcola buy_level
-        sar_bull  = entry.get('sar_bull', False)
-        above_kama = entry.get('price_above_kama', False)
-        ma200     = entry.get('ma200')
-        price     = entry['price']
-        obv_div   = entry.get('obv_divergence', False)
-        if sar_bull and above_kama and ma200 and price>ma200:
-            entry['buy_level'] = 'BUY1'
-        elif (sar_bull and above_kama) or (sar_bull and ma200 and price>ma200):
-            entry['buy_level'] = 'BUY2'
-        elif sar_bull or above_kama:
-            entry['buy_level'] = 'BUY3'
-        else:
-            entry['buy_level'] = 'WATCH'
-        # Ricalcola tech_score
-        ts = 0
-        if sar_bull:   ts += 35
-        if above_kama: ts += 30
-        if ma200 and price>ma200: ts += 20
-        if obv_div:    ts += 15
-        entry['tech_score'] = ts
-        # Ricalcola composite_score
-        entry['composite_score'] = round(
-            entry.get('score_master',0)*0.40 +
-            ts*0.40 +
-            (20 if obv_div else 0)*1.0, 1
-        )
-    else:
+    if t not in live:
         entry['ret_1d']       = None
         entry['live_updated'] = False
+        return entry
+
+    lv = live[t]
+    price = lv['price']
+    prev  = lv['prev']
+
+    entry['price']        = price
+    entry['ret_1d']       = lv['ret_1d']
+    entry['live_updated'] = True
+
+    if entry.get('low_52w') and entry['low_52w'] > 0:
+        entry['dist_52w_low'] = round((price - entry['low_52w']) / entry['low_52w'] * 100, 2)
+
+    # Aggiorna KAMA approssimato
+    kama = entry.get('kama')
+    kama_cross_prev = entry.get('price_above_kama', False)
+    if kama:
+        er = min(1.0, abs(price-prev) / (abs(price-prev) + 0.001))
+        sc = (er*(2/6-2/21)+2/21)**2
+        new_kama = kama + sc*(price-kama)
+        entry['kama']            = round(new_kama, 4)
+        price_above_kama_new     = price > new_kama
+        entry['price_above_kama'] = price_above_kama_new
+        # KAMA cross: prima era sotto, ora sopra
+        entry['kama_cross'] = bool(price_above_kama_new and not kama_cross_prev)
+        if entry['kama_cross']:
+            entry['kama_cross_bars'] = 1
+
+    # Aggiorna ATR rising approssimato
+    # Se prezzo sale e ATR (proxy: range giornaliero) è > ATR precedente
+    atr_prev = entry.get('atr')
+    if atr_prev and lv.get('high') and lv.get('low'):
+        daily_range = lv['high'] - lv['low']
+        # Smoothing semplice
+        new_atr = atr_prev * 0.9 + daily_range * 0.1
+        entry['atr']        = round(new_atr, 4)
+        price_rising        = price > prev
+        entry['atr_rising'] = bool(new_atr > atr_prev and price_rising)
+
+    # Price action 3 chiusure crescenti
+    closes_3 = lv.get('closes_3', [])
+    if len(closes_3) >= 3:
+        entry['price_action_3up'] = bool(closes_3[-1] > closes_3[-2] > closes_3[-3])
+
+    # Ricalcola trigger count e buy level
+    kama_cross    = entry.get('kama_cross', False)
+    atr_rising    = entry.get('atr_rising', False)
+    obv_divergence = entry.get('obv_divergence', False)
+
+    trigger_count = sum([kama_cross, atr_rising, obv_divergence])
+    entry['trigger_count'] = trigger_count
+
+    if trigger_count >= 3:   entry['buy_level'] = 'BUY1'
+    elif trigger_count == 2: entry['buy_level'] = 'BUY2'
+    elif trigger_count == 1: entry['buy_level'] = 'BUY3'
+    else:                    entry['buy_level'] = 'WATCH'
+
+    # Inversion score
+    score = 0
+    if kama_cross:
+        bars = entry.get('kama_cross_bars', 5)
+        base = 40
+        if bars == 1:   base += 10
+        elif bars == 2: base += 5
+        score += base
+    if atr_rising:     score += 30
+    if obv_divergence: score += 30
+    entry['inversion_score'] = min(100, score)
+
+    # Composite score
+    entry['composite_score'] = round(
+        entry.get('score_master', 0) * 0.40 +
+        entry['inversion_score']     * 0.60, 1
+    )
+
     return entry
 
 def compute_top20_live(all_entries: list) -> list:
-    """Seleziona TOP 20 dai candidati aggiornati con prezzi live."""
-    candidates = [e for e in all_entries if e.get('n_categorie',0)>=1 and e.get('live_updated')]
-    candidates.sort(key=lambda x: x.get('composite_score',0), reverse=True)
+    """Seleziona TOP 20 dai candidati aggiornati."""
+    candidates = [
+        e for e in all_entries
+        if e.get('n_categorie', 0) >= 1
+        and e.get('live_updated')
+        and e.get('trigger_count', 0) >= 1
+    ]
+    candidates.sort(key=lambda x: x.get('composite_score', 0), reverse=True)
+
     top20 = []
-    for level in ['BUY1','BUY2','BUY3','WATCH']:
+    for level in ['BUY1', 'BUY2', 'BUY3', 'WATCH']:
         items = [r for r in candidates if r.get('buy_level')==level and r not in top20]
         top20.extend(items)
-        if len(top20)>=20: break
+        if len(top20) >= 20:
+            break
     return top20[:20]
 
 def main():
     print("="*60)
-    print(f"RAPTOR MIN FINDER LIVE v2.0 — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    print(f"RAPTOR MIN FINDER LIVE v3.0 — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print("="*60)
 
     if not BASE_FILE.exists():
@@ -183,7 +219,7 @@ def main():
     lista4 = update_list(base.get("lista4_min_relativo", []))
     master = update_list(base.get("lista_master",        []))
 
-    # TOP 20 live — riordina con segnali aggiornati
+    # Deduplica per top20
     all_entries = lista1 + lista2 + lista3 + lista4
     seen = set()
     unique_entries = []
@@ -199,12 +235,13 @@ def main():
     buy3 = [r for r in top20 if r.get('buy_level')=='BUY3']
     print(f"\n  🎯 TOP 20 live: BUY1={len(buy1)} · BUY2={len(buy2)} · BUY3={len(buy3)}")
     for r in top20:
-        print(f"     {r['buy_level']} {r['ticker']:12} score={r.get('composite_score','—')}")
+        pa = "✓PA" if r.get('price_action_3up') else ""
+        print(f"     {r['buy_level']} {r['ticker']:12} score={r.get('composite_score','—')} inv={r.get('inversion_score','—')} {pa}")
 
     output = {
         "generated":      datetime.now(timezone.utc).isoformat(),
         "base_generated": base.get("generated"),
-        "version":        "2.0",
+        "version":        "3.0",
         "universe_tot":   base.get("universe_tot", 0),
         "analyzed":       base.get("analyzed", 0),
         "live_updated":   len(live_prices),
