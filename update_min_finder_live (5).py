@@ -1,0 +1,302 @@
+#!/usr/bin/env python3
+"""
+RAPTOR MIN FINDER — update_min_finder_live.py v3.1
+════════════════════════════════════════════════════
+Aggiornamento pomeridiano (15:00 IT) — solo candidati.
+
+CORREZIONI v3.1:
+  - kama_cross NON viene ricalcolato nel live update
+    (la formula approssimata genera falsi positivi).
+    Il cross rimane quello calcolato dalla scansione notturna.
+  - Filtro dist_52w_low <= 30% in compute_top20_live
+    (esclude ETF lontani dal minimo anche nel live).
+  - atr_rising aggiornato con range giornaliero (approssimazione accettabile).
+  - price_action_3up aggiornato con ultimi 3 prezzi.
+
+Input:  data/min_finder.json
+Output: data/min_finder_live.json
+"""
+
+import json, os, time
+from datetime import datetime, timezone
+from pathlib import Path
+
+def install(pkg):
+    os.system(f"pip install {pkg} --break-system-packages -q")
+
+try:
+    import yfinance as yf
+except ImportError:
+    install("yfinance"); import yfinance as yf
+
+try:
+    import numpy as np
+except ImportError:
+    install("numpy"); import numpy as np
+
+BASE_DIR  = Path(__file__).parent
+DATA_DIR  = BASE_DIR / "data"
+BASE_FILE = DATA_DIR / "min_finder.json"
+LIVE_FILE = DATA_DIR / "min_finder_live.json"
+
+BATCH_SIZE  = 50
+BATCH_DELAY = 1.0
+
+def fetch_live(tickers: list) -> dict:
+    result = {}
+    batches = [tickers[i:i+BATCH_SIZE] for i in range(0, len(tickers), BATCH_SIZE)]
+    for i, batch in enumerate(batches):
+        try:
+            if len(batch) == 1:
+                hist = yf.Ticker(batch[0]).history(period="5d", auto_adjust=True)
+                if not hist.empty:
+                    closes = hist['Close'].dropna()
+                    highs  = hist['High'].dropna()
+                    lows   = hist['Low'].dropna()
+                    vols   = hist['Volume'].dropna()
+                    if len(closes) >= 2:
+                        result[batch[0]] = {
+                            "price":    round(float(closes.iloc[-1]), 4),
+                            "prev":     round(float(closes.iloc[-2]), 4),
+                            "ret_1d":   round((closes.iloc[-1]/closes.iloc[-2]-1)*100, 2),
+                            "high":     round(float(highs.iloc[-1]), 4),
+                            "low":      round(float(lows.iloc[-1]), 4),
+                            "vol":      int(vols.iloc[-1]),
+                            # Ultimi 4 prezzi per price action (serve c[-4] < c[-3] < c[-2] < c[-1])
+                            "closes_4": [round(float(closes.iloc[j]), 4)
+                                         for j in range(max(-4, -len(closes)), 0)],
+                        }
+            else:
+                data = yf.download(batch, period="5d", interval="1d",
+                                   group_by="ticker", auto_adjust=True,
+                                   progress=False, threads=True)
+                for t in batch:
+                    try:
+                        td = data[t] if len(batch) > 1 else data
+                        closes = td['Close'].dropna()
+                        if len(closes) >= 2:
+                            highs = td['High'].reindex(closes.index).fillna(closes)
+                            lows  = td['Low'].reindex(closes.index).fillna(closes)
+                            vols  = td['Volume'].reindex(closes.index).fillna(0)
+                            result[t] = {
+                                "price":    round(float(closes.iloc[-1]), 4),
+                                "prev":     round(float(closes.iloc[-2]), 4),
+                                "ret_1d":   round((closes.iloc[-1]/closes.iloc[-2]-1)*100, 2),
+                                "high":     round(float(highs.iloc[-1]), 4),
+                                "low":      round(float(lows.iloc[-1]), 4),
+                                "vol":      int(vols.iloc[-1]),
+                                "closes_4": [round(float(closes.iloc[j]), 4)
+                                             for j in range(max(-4, -len(closes)), 0)],
+                            }
+                    except:
+                        pass
+        except Exception as e:
+            print(f"  err batch {i+1}: {e}")
+        if i < len(batches)-1:
+            time.sleep(BATCH_DELAY)
+    return result
+
+def update_entry(entry: dict, live: dict) -> dict:
+    t = entry['ticker']
+    if t not in live:
+        entry['ret_1d']       = None
+        entry['live_updated'] = False
+        return entry
+
+    lv    = live[t]
+    price = lv['price']
+    prev  = lv['prev']
+
+    entry['price']        = price
+    entry['ret_1d']       = lv['ret_1d']
+    entry['live_updated'] = True
+
+    # Aggiorna dist_52w_low
+    if entry.get('low_52w') and entry['low_52w'] > 0:
+        entry['dist_52w_low'] = round((price - entry['low_52w']) / entry['low_52w'] * 100, 2)
+
+    # ── KAMA ──────────────────────────────────────────────────
+    # Aggiorna solo il valore KAMA per visualizzazione.
+    # kama_cross NON viene ricalcolato — la formula approssimata
+    # genera falsi positivi. Il cross rimane quello della scansione notturna.
+    kama = entry.get('kama')
+    if kama:
+        er      = min(1.0, abs(price-prev) / (abs(price-prev) + 0.001))
+        sc      = (er*(2/6-2/21)+2/21)**2
+        new_kama = kama + sc*(price-kama)
+        entry['kama']             = round(new_kama, 4)
+        entry['price_above_kama'] = price > new_kama
+        # kama_cross e kama_cross_bars rimangono invariati dalla scansione notturna
+
+    # ── ATR RISING ────────────────────────────────────────────
+    # Approssimazione accettabile: ATR smoothato con range giornaliero.
+    atr_prev = entry.get('atr')
+    if atr_prev and lv.get('high') and lv.get('low'):
+        daily_range = lv['high'] - lv['low']
+        new_atr = atr_prev * 0.9 + daily_range * 0.1
+        entry['atr']        = round(new_atr, 4)
+        price_rising        = price > prev
+        entry['atr_rising'] = bool(new_atr > atr_prev and price_rising)
+
+    # ── PRICE ACTION ──────────────────────────────────────────
+    # 3 chiusure consecutive crescenti — aggiornabile con dati live.
+    closes_4 = lv.get('closes_4', [])
+    if len(closes_4) >= 3:
+        entry['price_action_3up'] = bool(
+            closes_4[-1] > closes_4[-2] > closes_4[-3]
+        )
+
+    # ── TRIGGER COUNT E BUY LEVEL ─────────────────────────────
+    # kama_cross: dalla scansione notturna (non toccato)
+    # atr_rising: aggiornato sopra
+    # obv_divergence: dalla scansione notturna, ma verifica KAMA ancora flat
+    #   Se KAMA si e' rimessa in discesa (price_above_kama False e kama scende),
+    #   invalida l'OBV divergenza perche' il trend non si e' stabilizzato.
+    kama_cross     = entry.get('kama_cross', False)
+    atr_rising     = entry.get('atr_rising', False)
+    obv_div_base   = entry.get('obv_divergence', False)
+    # KAMA flat proxy nel live: se prezzo e' ancora sotto KAMA di oltre 3%,
+    # KAMA probabilmente scende ancora — OBV divergenza non valida
+    kama_val  = entry.get('kama')
+    price_val = entry.get('price')
+    kama_flat_proxy = True
+    if kama_val and price_val and kama_val > 0:
+        gap = (kama_val - price_val) / kama_val
+        kama_flat_proxy = bool(gap < 0.03)  # prezzo entro 3% sotto KAMA
+    obv_divergence = bool(obv_div_base and kama_flat_proxy)
+
+    trigger_count = sum([kama_cross, atr_rising, obv_divergence])
+    entry['trigger_count'] = trigger_count
+
+    if trigger_count >= 3:   entry['buy_level'] = 'BUY1'
+    elif trigger_count == 2: entry['buy_level'] = 'BUY2'
+    elif trigger_count == 1: entry['buy_level'] = 'BUY3'
+    else:                    entry['buy_level'] = 'WATCH'
+
+    # ── INVERSION SCORE ───────────────────────────────────────
+    score = 0
+    if kama_cross:
+        bars = entry.get('kama_cross_bars') or 5
+        base = 40
+        if bars == 1:   base += 10
+        elif bars == 2: base += 5
+        score += base
+    if atr_rising:     score += 30
+    if obv_divergence: score += 30
+    entry['inversion_score'] = min(100, score)
+
+    # ── COMPOSITE SCORE ───────────────────────────────────────
+    entry['composite_score'] = round(
+        entry.get('score_master', 0) * 0.40 +
+        entry['inversion_score']     * 0.60, 1
+    )
+
+    return entry
+
+
+def compute_top20_live(all_entries: list) -> list:
+    """
+    Seleziona TOP 20 dai candidati aggiornati con prezzi live.
+    Richiede:
+      - live_updated = True
+      - trigger_count >= 1
+      - dist_52w_low <= 30% (ETF in zona minimo reale)
+    """
+    TOP20_CAT_ESCLUSE = {'Short'}
+    candidates = [
+        e for e in all_entries
+        if e.get('live_updated')
+        and e.get('n_categorie', 0) >= 1
+        and e.get('trigger_count', 0) >= 1
+        and e.get('dist_52w_low', 999) <= 30.0
+        and e.get('categoria', '') not in TOP20_CAT_ESCLUSE
+    ]
+    candidates.sort(key=lambda x: x.get('composite_score', 0), reverse=True)
+
+    top20 = []
+    for level in ['BUY1', 'BUY2', 'BUY3', 'WATCH']:
+        items = [r for r in candidates if r.get('buy_level')==level and r not in top20]
+        top20.extend(items)
+        if len(top20) >= 20:
+            break
+    return top20[:20]
+
+
+def main():
+    print("="*60)
+    print(f"RAPTOR MIN FINDER LIVE v3.1 — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    print("="*60)
+
+    if not BASE_FILE.exists():
+        print(f"❌ File base non trovato: {BASE_FILE}")
+        print("   Esegui prima fetch_min_finder.py")
+        return
+
+    with open(BASE_FILE) as f:
+        base = json.load(f)
+
+    candidates = base.get("candidates", [])
+    print(f"\n  Candidati da aggiornare: {len(candidates)}")
+
+    print(f"\n  Download prezzi live...")
+    live_prices = fetch_live(candidates)
+    print(f"  Aggiornati: {len(live_prices)}/{len(candidates)}")
+
+    def update_list(lst):
+        return [update_entry(dict(e), live_prices) for e in lst]
+
+    lista1 = update_list(base.get("lista1_min_storico",  []))
+    lista2 = update_list(base.get("lista2_pullback",     []))
+    lista3 = update_list(base.get("lista3_compressione", []))
+    lista4 = update_list(base.get("lista4_min_relativo", []))
+    master = update_list(base.get("lista_master",        []))
+
+    # Deduplica per top20
+    all_entries = lista1 + lista2 + lista3 + lista4
+    seen = set()
+    unique_entries = []
+    for e in all_entries:
+        if e['ticker'] not in seen:
+            seen.add(e['ticker'])
+            unique_entries.append(e)
+
+    top20 = compute_top20_live(unique_entries)
+
+    buy1 = [r for r in top20 if r.get('buy_level')=='BUY1']
+    buy2 = [r for r in top20 if r.get('buy_level')=='BUY2']
+    buy3 = [r for r in top20 if r.get('buy_level')=='BUY3']
+    print(f"\n  🎯 TOP 20 live: BUY1={len(buy1)} · BUY2={len(buy2)} · BUY3={len(buy3)}")
+    for r in top20:
+        dist = r.get('dist_52w_low', '?')
+        pa   = "✓PA" if r.get('price_action_3up') else ""
+        print(f"     {r['buy_level']} {r['ticker']:12} "
+              f"score={r.get('composite_score','—')} "
+              f"inv={r.get('inversion_score','—')} "
+              f"dist={dist}% {pa}")
+
+    output = {
+        "generated":      datetime.now(timezone.utc).isoformat(),
+        "base_generated": base.get("generated"),
+        "version":        "3.1",
+        "universe_tot":   base.get("universe_tot", 0),
+        "analyzed":       base.get("analyzed", 0),
+        "live_updated":   len(live_prices),
+        "stats":          base.get("stats", {}),
+        "soglie":         base.get("soglie", {}),
+        "top20":          top20,
+        "lista1_min_storico":  lista1,
+        "lista2_pullback":     lista2,
+        "lista3_compressione": lista3,
+        "lista4_min_relativo": lista4,
+        "lista_master":        master,
+        "charts":              base.get("charts", {}),
+    }
+
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    with open(LIVE_FILE, "w", encoding="utf-8") as f:
+        json.dump(output, f, ensure_ascii=False, separators=(',',':'))
+
+    print(f"\n✅ Salvato: {LIVE_FILE}")
+
+if __name__ == "__main__":
+    main()
