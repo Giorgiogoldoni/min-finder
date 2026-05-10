@@ -1,0 +1,84 @@
+name: RAPTOR Min Finder
+
+on:
+  schedule:
+    # Scansione completa — ogni notte alle 02:00 UTC (03:00 CET)
+    - cron: '0 2 * * 1-5'
+    # Live update — 08:30 UTC (09:30 CET) e 15:00 UTC (16:00 CET)
+    - cron: '30 8 * * 1-5'
+    - cron: '0 15 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Modalità'
+        required: true
+        default: 'live'
+        type: choice
+        options:
+          - live
+          - full
+
+jobs:
+  # ── JOB FULL (scansione notturna) ─────────────────────────
+  full-scan:
+    name: Scansione completa
+    runs-on: ubuntu-latest
+    timeout-minutes: 340   # 5h40m — sotto il limite GitHub di 6h
+    permissions:
+      contents: write
+    # Gira solo alle 02:00 UTC oppure se manuale con mode=full
+    if: |
+      (github.event_name == 'schedule' && startsWith(github.event.schedule, '0 2')) ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'full')
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install yfinance numpy --break-system-packages -q
+
+      - name: Run full scan
+        run: python fetch_min_finder.py
+
+      - name: Commit & push
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/
+          git diff --staged --quiet || git commit -m "chore: update min_finder data [$(date -u '+%Y-%m-%d %H:%M')] [full]"
+          git push
+
+  # ── JOB LIVE (aggiornamento prezzi) ───────────────────────
+  live-update:
+    name: Aggiornamento live
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    # Gira alle 08:30 e 15:00 UTC oppure se manuale con mode=live
+    if: |
+      (github.event_name == 'schedule' && !startsWith(github.event.schedule, '0 2')) ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'live')
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install yfinance numpy --break-system-packages -q
+
+      - name: Run live update
+        run: python update_min_finder_live.py
+
+      - name: Commit & push
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/
+          git diff --staged --quiet || git commit -m "chore: update min_finder data [$(date -u '+%Y-%m-%d %H:%M')] [live]"
+          git push
