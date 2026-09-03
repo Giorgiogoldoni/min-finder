@@ -253,6 +253,7 @@ button{font-family:'Syne',sans-serif;cursor:pointer;border:none;background:none;
     </div>
     <div class="nav-meta">AGG: <b id="lastUpd">—</b></div>
     <button onclick="exportExcel()" id="exportBtn" class="nav-btn" style="background:rgba(34,197,94,.15);border-color:rgba(34,197,94,.4);color:#86efac;" title="Scarica Excel universe completo">⬇ Excel</button>
+    <a href="regole.pdf" target="_blank" class="nav-btn" style="background:rgba(59,130,246,.15);border-color:rgba(59,130,246,.4);color:#93c5fd;" title="Regole operative in PDF">📄 Regole</a>
     <a href="https://giorgiogoldoni.github.io/trader/" class="nav-btn">← Hub</a>
   </div>
 </nav>
@@ -261,6 +262,7 @@ button{font-family:'Syne',sans-serif;cursor:pointer;border:none;background:none;
 <div class="main-tabs">
   <div class="main-tab active" onclick="showTab('cruscotto',this)">🎯 Cruscotto</div>
   <div class="main-tab" onclick="showTab('lista',this)">📋 Lista completa</div>
+  <div class="main-tab" onclick="showTab('regole',this)">📖 Regole</div>
 </div>
 
 <!-- SUBBAR -->
@@ -347,6 +349,86 @@ button{font-family:'Syne',sans-serif;cursor:pointer;border:none;background:none;
       <div class="lh c col-cat">ZONA</div>
     </div>
     <div id="listEl"></div>
+  </div>
+</div>
+
+<!-- TAB REGOLE -->
+<div class="tab-content" id="tab-regole">
+  <div style="max-width:900px;margin:0 auto;padding:24px 20px 60px;">
+
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;">
+      <h2 style="font-size:18px;color:var(--text);margin:0;">Come funziona Min Finder</h2>
+      <a href="regole.pdf" target="_blank" class="nav-btn" style="background:rgba(29,78,216,.1);border-color:rgba(29,78,216,.3);color:var(--accent);text-decoration:none;padding:8px 14px;border-radius:6px;font-size:12px;font-weight:700;">📄 Regole (PDF)</a>
+    </div>
+
+    <p style="font-size:13px;line-height:1.6;color:var(--text2);margin-bottom:20px;">
+      Il sistema scansiona ogni notte l'universo ETF alla ricerca di strumenti in prossimità di un minimo,
+      e verifica se ci sono segnali tecnici di un'inversione in corso. Non è un sistema di uscita: individua
+      solo candidati d'ingresso.
+    </p>
+
+    <h3 style="font-size:14px;color:var(--accent);margin:20px 0 8px;">I tre trigger di inversione</h3>
+    <table style="width:100%;border-collapse:collapse;font-size:12.5px;margin-bottom:16px;">
+      <thead><tr style="background:var(--navy);color:#fff;">
+        <th style="padding:8px 10px;text-align:left;">Trigger</th>
+        <th style="padding:8px 10px;text-align:left;">Condizione</th>
+      </tr></thead>
+      <tbody>
+        <tr style="border-bottom:1px solid var(--border);"><td style="padding:8px 10px;font-weight:700;">KAMA cross</td><td style="padding:8px 10px;">Prezzo attraversa la KAMA (10,5,20) dal basso, entro le ultime 5 barre</td></tr>
+        <tr style="border-bottom:1px solid var(--border);"><td style="padding:8px 10px;font-weight:700;">ATR in crescita</td><td style="padding:8px 10px;">ATR(14) oggi superiore a 5 barre fa, mentre il prezzo è salito nello stesso periodo</td></tr>
+        <tr style="border-bottom:1px solid var(--border);"><td style="padding:8px 10px;font-weight:700;">Divergenza OBV</td><td style="padding:8px 10px;">Prezzo in calo su 20 barre mentre l'OBV sale, con KAMA piatta (var. &lt;2% su 10 barre)</td></tr>
+      </tbody>
+    </table>
+
+    <h3 style="font-size:14px;color:var(--accent);margin:20px 0 8px;">Livelli di segnale</h3>
+    <table style="width:100%;border-collapse:collapse;font-size:12.5px;margin-bottom:16px;">
+      <thead><tr style="background:var(--navy);color:#fff;">
+        <th style="padding:8px 10px;text-align:left;">Livello</th>
+        <th style="padding:8px 10px;text-align:left;">Condizione</th>
+        <th style="padding:8px 10px;text-align:left;">Significato</th>
+      </tr></thead>
+      <tbody>
+        <tr style="border-bottom:1px solid var(--border);"><td style="padding:8px 10px;font-weight:700;color:var(--green);">BUY1</td><td style="padding:8px 10px;">3 trigger su 3 attivi</td><td style="padding:8px 10px;">Segnale di inversione completo</td></tr>
+        <tr style="border-bottom:1px solid var(--border);"><td style="padding:8px 10px;font-weight:700;color:var(--orange);">BUY2</td><td style="padding:8px 10px;">2 trigger su 3 attivi</td><td style="padding:8px 10px;">Segnale in costruzione — size ridotta</td></tr>
+        <tr style="border-bottom:1px solid var(--border);"><td style="padding:8px 10px;font-weight:700;">BUY3</td><td style="padding:8px 10px;">1 trigger su 3 attivi</td><td style="padding:8px 10px;">Monitora, entra solo se rafforza a BUY2</td></tr>
+      </tbody>
+    </table>
+
+    <h3 style="font-size:14px;color:var(--accent);margin:20px 0 8px;">Le quattro categorie di "minimo"</h3>
+    <table style="width:100%;border-collapse:collapse;font-size:12.5px;margin-bottom:16px;">
+      <thead><tr style="background:var(--navy);color:#fff;">
+        <th style="padding:8px 10px;text-align:left;">Categoria</th>
+        <th style="padding:8px 10px;text-align:left;">Soglia</th>
+      </tr></thead>
+      <tbody>
+        <tr style="border-bottom:1px solid var(--border);"><td style="padding:8px 10px;font-weight:700;">Minimo storico</td><td style="padding:8px 10px;">Prezzo entro il 10% dal minimo delle ultime 52 settimane</td></tr>
+        <tr style="border-bottom:1px solid var(--border);"><td style="padding:8px 10px;font-weight:700;">Pullback su trend</td><td style="padding:8px 10px;">Ritracciamento 4 settimane 5-15%, prezzo sopra MA200 (tolleranza 5%), MA200 in salita</td></tr>
+        <tr style="border-bottom:1px solid var(--border);"><td style="padding:8px 10px;font-weight:700;">Compressione volatilità</td><td style="padding:8px 10px;">ATR attuale inferiore al 70% della media di volatilità degli ultimi 3 mesi</td></tr>
+        <tr style="border-bottom:1px solid var(--border);"><td style="padding:8px 10px;font-weight:700;">Minimo relativo</td><td style="padding:8px 10px;">Rendimento 3 mesi inferiore di almeno 8 punti percentuali alla media della propria categoria</td></tr>
+      </tbody>
+    </table>
+
+    <h3 style="font-size:14px;color:var(--accent);margin:20px 0 8px;">Punteggio composito</h3>
+    <p style="font-size:12.5px;line-height:1.6;color:var(--text2);margin-bottom:16px;background:var(--bg2);padding:10px 12px;border-radius:6px;">
+      <b>composite_score = punteggio_categorie_max × 0.40 + punteggio_inversione × 0.60</b><br>
+      Punteggio inversione: 40 punti se scatta il cross KAMA (+10 se nell'ultima barra, +5 se 2 barre fa),
+      30 punti per ATR in crescita, 30 punti per divergenza OBV.
+    </p>
+
+    <div style="background:#fef3c7;border:1px solid #f59e0b;border-radius:8px;padding:12px 14px;margin:20px 0;">
+      <div style="font-weight:700;font-size:12.5px;color:#92400e;margin-bottom:4px;">⚠️ Nota di trasparenza sui risultati storici</div>
+      <div style="font-size:12px;line-height:1.6;color:#78350f;">
+        Un backtest indipendente sul metodo dei 3 trigger (universo ETF EUR Xetra/Borsa Italiana, storico 3 anni)
+        non ha mostrato un vantaggio rispetto al rendimento medio dello stesso strumento in un giorno qualsiasi.
+        <b>Il livello BUY1 (considerato il più affidabile) ha mostrato l'eccesso peggiore dei tre (-0,32% a 20 giorni)</b> —
+        il contrario di quanto ci si aspetterebbe. Il test è su un universo diverso da quello coperto qui
+        (non l'universo esteso USA/altro) — non è detto che il risultato si trasferisca identico, ma consiglia cautela.
+      </div>
+    </div>
+
+    <h3 style="font-size:14px;color:var(--accent);margin:20px 0 8px;">Bacino — composizione dell'universo</h3>
+    <div id="bacinoBox" style="font-size:12.5px;color:var(--text2);">Caricamento…</div>
+
   </div>
 </div>
 
@@ -440,6 +522,7 @@ async function load() {
 
   renderDashboard();
   renderList();
+  renderBacino();
 }
 
 function buildCandidates() {
@@ -475,6 +558,61 @@ function updateUpdBar() {
     `<span>Live: <b>${DATA.live_updated||0}</b></span>`+
     `<span>Universe: <b>${DATA.universe_tot||0}</b></span>`+
     `<span>Con trigger: <b>${allCandidates.length}</b></span>`;
+}
+
+// ── BACINO ────────────────────────────────────────────────────
+async function renderBacino() {
+  const box = document.getElementById('bacinoBox');
+  if (!box) return;
+  try {
+    const r = await fetch('data/etf_universe.json?t=' + Date.now());
+    if (!r.ok) throw new Error('fetch fallito');
+    const universe = await r.json();
+
+    const byBorsa = {};
+    const byMacro = {};
+    for (const e of universe) {
+      const b = e.BORSA || '?';
+      byBorsa[b] = (byBorsa[b] || 0) + 1;
+      const macro = getMacro({ categoria: e.CATEGORIA, name: e.NOME });
+      byMacro[macro] = (byMacro[macro] || 0) + 1;
+    }
+
+    const totUniverse = universe.length;
+    const analyzedPct = DATA.analyzed && totUniverse ? (DATA.analyzed / totUniverse * 100).toFixed(0) : '—';
+
+    const borsaRows = Object.entries(byBorsa).sort((a, b) => b[1] - a[1])
+      .map(([b, n]) => `<tr style="border-bottom:1px solid var(--border);"><td style="padding:6px 10px;">${b}</td><td style="padding:6px 10px;text-align:right;font-weight:700;">${n}</td><td style="padding:6px 10px;text-align:right;color:var(--text3);">${(n / totUniverse * 100).toFixed(1)}%</td></tr>`)
+      .join('');
+
+    const macroRows = Object.entries(byMacro).sort((a, b) => b[1] - a[1])
+      .map(([m, n]) => `<tr style="border-bottom:1px solid var(--border);"><td style="padding:6px 10px;">${CAT_LABEL[m] || m}</td><td style="padding:6px 10px;text-align:right;font-weight:700;">${n}</td><td style="padding:6px 10px;text-align:right;color:var(--text3);">${(n / totUniverse * 100).toFixed(1)}%</td></tr>`)
+      .join('');
+
+    box.innerHTML = `
+      <p style="margin-bottom:12px;">
+        Universo totale: <b>${totUniverse}</b> strumenti · analizzati in questo run: <b>${DATA.analyzed || '—'}</b>
+        (${analyzedPct}% — la scansione è incrementale, riusa la cache prezzi delle ultime 24h, non è un dato parziale/anomalo).
+      </p>
+      <div style="display:flex;gap:24px;flex-wrap:wrap;">
+        <div style="flex:1;min-width:260px;">
+          <div style="font-weight:700;margin-bottom:6px;">Per borsa</div>
+          <table style="width:100%;border-collapse:collapse;font-size:12px;">
+            <thead><tr style="background:var(--bg2);"><th style="padding:6px 10px;text-align:left;">Borsa</th><th style="padding:6px 10px;text-align:right;">N.</th><th style="padding:6px 10px;text-align:right;">%</th></tr></thead>
+            <tbody>${borsaRows}</tbody>
+          </table>
+        </div>
+        <div style="flex:1;min-width:260px;">
+          <div style="font-weight:700;margin-bottom:6px;">Per categoria macro</div>
+          <table style="width:100%;border-collapse:collapse;font-size:12px;">
+            <thead><tr style="background:var(--bg2);"><th style="padding:6px 10px;text-align:left;">Categoria</th><th style="padding:6px 10px;text-align:right;">N.</th><th style="padding:6px 10px;text-align:right;">%</th></tr></thead>
+            <tbody>${macroRows}</tbody>
+          </table>
+        </div>
+      </div>`;
+  } catch (e) {
+    box.innerHTML = '<span style="color:var(--red);">Impossibile caricare data/etf_universe.json</span>';
+  }
 }
 
 // ── TABS ──────────────────────────────────────────────────────
