@@ -1,0 +1,42 @@
+name: REV1 Signal Scanner
+
+on:
+  schedule:
+    # Gira 30 minuti dopo la scansione notturna completa (02:00 UTC),
+    # quando la cache prezzi del motore principale è già aggiornata
+    - cron: '30 2 * * 1-5'
+  workflow_dispatch: # Anche manuale, in qualsiasi momento
+
+permissions:
+  contents: write
+
+concurrency:
+  group: min-finder-rev1
+  cancel-in-progress: false
+
+jobs:
+  compute-rev1:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout del codice
+        uses: actions/checkout@v4
+
+      - name: Configura Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Calcola Segnali REV1 (solo cache esistente, nessun fetch)
+        run: |
+          python compute_rev1_signals.py
+
+      - name: Commit e Push
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/rev1_signals.json
+          git commit -m "Aggiorna segnali REV1 [skip ci]" || exit 0
+          git pull --rebase origin main
+          git push
